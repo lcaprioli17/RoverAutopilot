@@ -1,4 +1,3 @@
-import csv
 from tqdm import tqdm
 import os
 import shutil
@@ -232,7 +231,6 @@ def interpolate_frame_sensor(
         interpolation=1,
         sub_fixes=None
 ):
-    # TODO: change timestamp attribute index and add the first row of attributes
     """
     For each image in img_dir interpolates measurements from sensor_file and saves the in a file.
     At the end there will be a file containing a measurement of the specified sensor for each image.
@@ -253,6 +251,8 @@ def interpolate_frame_sensor(
 
     sensor_path = sensors_dir + '/' + sensor_file
     sensor_df = pd.read_csv(sensor_path)
+    frame_sensor_df = pd.DataFrame(columns=sensor_df.columns)
+    frame_sensor_df.to_csv(sensors_dir + '/frame_sensor_' + sensor_file, mode='a', index=False)
     frame_sensor_row = None
     checkpoint = 0
     prev_row = None
@@ -274,7 +274,7 @@ def interpolate_frame_sensor(
 
             elif prev_row is not None and prev_row['timestamp'] <= img_timestamp < row['timestamp']:
                 # print(f"Nearest timestamp for image number {img_num} with timestamp {img_timestamp} is {prev_row['timestamp']} at index {checkpoint}")
-                frame_sensor_row = interpolate_row(sensor_df, img_timestamp, index - 1, interpolation,  n)
+                frame_sensor_row = interpolate_row(sensor_df, img_timestamp, index - 1, interpolation, n)
                 img_num += 1
                 break
 
@@ -320,6 +320,25 @@ def interpolate_row(src_df, timestamp, index, interpolation, n):
         print('\nERROR: Interpolation should be 1:forward, -1:backward, 0:both!')
         sys.exit("\nStopping the program.")
 
-    interpolated_row['timestamp'] = timestamp
+    interpolated_row.insert(0, 'timestamp', timestamp)
     # print(f'The nearest row added for image {timestamp} had index {index}. Now it has timestamp {interpolated_row.iloc[-1]}.\n')
     return interpolated_row
+
+
+def get_labels(sensors_dir, sensor_file, features):
+    """
+    Extract the labels from the sensor file.
+
+    :param sensors_dir: Path to the directory where all the sensors are saved.
+    :param sensor_file: File containing the specific sensor measurements.
+    :param features: Features to extract and to use as labels.
+    """
+    sensor_path = sensors_dir + '/' + sensor_file
+    sensor_df = pd.read_csv(sensor_path)
+
+    labels = pd.DataFrame(columns=features, data=sensor_df[features])
+
+    labels.to_csv(sensors_dir + '/labels.csv', mode='a', index=False, header=False)
+
+
+get_labels('D:/Dataset/Rover/KBPR/dataset/csv', 'frame_sensor_imu_standard_timestamp.csv', ['acc_x'])
