@@ -1,3 +1,5 @@
+import pandas as pd
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,51 +10,28 @@ from PIL import Image
 import os
 import pytorch_lightning as pl
 import numpy as np
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, LightningDataModule
 from torchmetrics import Accuracy
 from sklearn.model_selection import train_test_split
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping
+from tqdm import tqdm
 
 
-def create_dataloaders(train_paths, val_paths, test_paths, train_targets, val_targets, test_targets, transform, batch_size=32):
-    train_dataset = CustomImageDataset(train_paths, train_targets, transform=transform)
-    val_dataset = CustomImageDataset(val_paths, val_targets, transform=transform)
-    test_dataset = CustomImageDataset(test_paths, test_targets, transform=transform)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-    return train_loader, val_loader, test_loader
-
-
-class LossLoggerCallback(pl.callbacks.Callback):
-    def __init__(self, log_file='D:/Dataset/Rover/KBPR/dataset/csv/loss_log.txt'):
-        self.log_file = log_file
-        with open(self.log_file, 'w') as f:
-            f.write("epoch,train_loss,val_loss\n")  # Header for the log file
-
-    def on_epoch_end(self, trainer, pl_module):
-        # Get the logged losses
-        train_loss = trainer.callback_metrics.get('train_loss', None)
-
-        # Append losses to the log file
-        with open(self.log_file, 'a') as f:
-            f.write(f"{trainer.current_epoch},{train_loss}\n")
-
-
-class CustomImageDataset(Dataset):
-    def __init__(self, image_dir, labels_file, transform=None):
+class RoverImageDataset(Dataset):
+    def __init__(self, image_dir, label_dir, transform=None):
         self.image_dir = image_dir
+        self.labels_file = os.path.join(label_dir, 'labels.csv')
         self.transform = transform
         self.image_files = [f for f in os.listdir(image_dir) if f.endswith('.png') or f.endswith('.jpg')]
-        # Assuming labels are stored in a file named 'labels.txt'
-        self.labels = self.load_labels(labels_file)
+        self.labels = self.load_labels()
 
-    def load_labels(self, labels_path):
-        with open(labels_path, 'r') as f:
-            labels = [float(line.strip()) for line in f.readlines()]
+        # Debugging statement
+        print(f"Loaded {len(self.image_files)} images and {len(self.labels)} labels.")
+
+    def load_labels(self):
+        df = pd.read_csv(self.labels_file)
+        labels = df.iloc[:, 0].astype(float).tolist()  # Assuming labels are in the first column
         return labels
 
     def __len__(self):
@@ -67,6 +46,67 @@ class CustomImageDataset(Dataset):
             image = self.transform(image)
 
         return image, label
+
+
+class RoverDataModule(LightningDataModule):
+    def __init__(self, data_dir: str, label_dir: str, transform=None, batch_size: int = 32):
+        super().__init__()
+        self.data_dir = data_dir
+        self.label_dir = label_dir
+        self.transform = transform
+        self.batch_size = batch_size
+        self.train = None
+        self.val = None
+        self.test = None
+
+    def create_datasets(self, stage):
+        if self.transform is None:
+            self.transform = transforms.Compose([
+                transforms.Resize((128, 128)),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,))
+            ])
+
+        # TODO: Check how to call the DataModule using the stages
+        if stage == 'fit':
+            train_dataset = RoverImageDataset(os.path.join(self.data_dir, 'train'), os.path.join(self.label_dir, 'train'), transform=self.transform)
+            val_dataset = RoverImageDataset(os.path.join(self.data_dir, 'val'), os.path.join(self.label_dir, 'val'), transform=self.transform)
+
+            return train_dataset, val_dataset, None
+
+        if stage == 'test':
+            test_dataset = RoverImageDataset(os.path.join(self.data_dir, 'test'), os.path.join(self.label_dir, 'test'), transform=self.transform)
+            return None, None, test_dataset
+
+        else:
+            print('\nOne or more dataset where not initialized correctly.')
+            exit()
+
+        # train_dataset = RoverImageDataset(os.path.join(self.data_dir, 'train'), os.path.join(self.label_dir, 'train'), transform=self.transform)
+        # val_dataset = RoverImageDataset(os.path.join(self.data_dir, 'val'), os.path.join(self.label_dir, 'val'), transform=self.transform)
+        # test_dataset = RoverImageDataset(os.path.join(self.data_dir, 'test'), os.path.join(self.label_dir, 'test'), transform=self.transform)
+        # return train_dataset, val_dataset, test_dataset
+
+    def setup(self, stage: str):
+        # TODO: Check how to call the DataModule using the stages
+        # Assign train/val datasets for use in dataloaders
+        if stage == "fit":
+            self.train, self.val, self.test = self.create_datasets(stage)
+
+        # Assign test dataset for use in dataloader(s)
+        if stage == "test":
+            self.train, self.val, self.test = self.create_datasets(stage)
+
+        # self.train, self.val, self.test = self.create_datasets(stage)
+
+    def train_dataloader(self):
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=False)
+
+    def val_dataloader(self):
+        return DataLoader(self.val, batch_size=self.batch_size, shuffle=False)
+
+    def test_dataloader(self):
+        return DataLoader(self.test, batch_size=self.batch_size, shuffle=False)
 
 
 class CNNLSTMModel(nn.Module):
@@ -92,8 +132,8 @@ class CNNLSTMModel(nn.Module):
         self.fc = nn.Linear(256, 1)
 
     def forward(self, x):
-        batch_size, _, _, _ = x.size()
-        c_in = x.view(batch_size, 1, 128, 128)
+        batch_size, c, h, w = x.size()
+        c_in = x.view(batch_size, c, h, w)
         c_out = self.cnn(c_in)
         r_in = c_out.view(batch_size, -1)
         r_out, (h_n, c_n) = self.lstm(r_in)
@@ -103,9 +143,9 @@ class CNNLSTMModel(nn.Module):
 
 
 # PyTorch Lightning Module
-class AccelerationRegressor(pl.LightningModule):
+class RoverRegressor(pl.LightningModule):
     def __init__(self):
-        super(AccelerationRegressor, self).__init__()
+        super(RoverRegressor, self).__init__()
         self.model = CNNLSTMModel()
         self.loss_fn = nn.MSELoss()
 
@@ -118,15 +158,15 @@ class AccelerationRegressor(pl.LightningModule):
         y = y.float()
         y_hat = self.forward(x)
         loss = self.loss_fn(y_hat, y)
-        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return loss
+        return {"loss": loss}
 
-    # def validation_step(self, batch, batch_idx):
-    #     x, y = batch
-    #     y_hat = self.forward(x)
-    #     loss = self.loss_fn(y_hat, y)
-    #     self.log('val_loss', loss)
-    #     return loss
+    def validation_step(self, batch, batch_idx):
+        x, y = batch
+        x = x.float()
+        y = y.float()
+        y_hat = self.forward(x)
+        loss = self.loss_fn(y_hat, y)
+        return {"loss": loss}
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.001)
@@ -134,23 +174,14 @@ class AccelerationRegressor(pl.LightningModule):
 
 def main():
     images = 'D:/Dataset/Rover/KBPR/dataset/image/raw'
-    labels = 'D:/Dataset/Rover/KBPR/dataset/csv/labels.csv'
+    labels = 'D:/Dataset/Rover/KBPR/dataset/label'
 
-    transform = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,), (0.5,))
-    ])
-
-    dataset = CustomImageDataset(images, labels, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+    data_module = RoverDataModule(images, labels)
 
     # Training
-    model = AccelerationRegressor()
-    # Create a custom callback instance
-    loss_logger = LossLoggerCallback()
-    trainer = pl.Trainer(max_epochs=1, accelerator='gpu', callbacks=[loss_logger])
-    trainer.fit(model, dataloader)
+    model = RoverRegressor()
+    trainer = pl.Trainer(max_epochs=1, accelerator='gpu')
+    trainer.fit(model, data_module)
 
 
 if __name__ == '__main__':

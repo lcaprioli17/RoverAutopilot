@@ -1,8 +1,11 @@
+import glob
+
 from tqdm import tqdm
 import os
 import shutil
 import sys
 import pandas as pd
+from sklearn.model_selection import train_test_split
 
 
 def move_images_with_specific_name(
@@ -105,7 +108,7 @@ def images_to_dataset(
     :param suffix: Suffix of the images to move.
     """
     data_root = root_dir + '/data'
-    dataset_dir = root_dir + '/dataset/image/raw'
+    dataset_dir = root_dir + '/dataset/image/raw/full'
 
     if not os.path.exists(data_root):
         print('\nERROR: Put the raw data in the "/data" folder under the root directory!')
@@ -285,7 +288,13 @@ def interpolate_frame_sensor(
         frame_sensor_df.to_csv(sensors_dir + '/frame_sensor_' + sensor_file, mode='a', index=False, header=False)
 
 
-def interpolate_row(src_df, timestamp, index, interpolation, n):
+def interpolate_row(
+        src_df,
+        timestamp,
+        index,
+        interpolation,
+        n
+):
     """
     Interpolate the measurements for the image with the specific timestamp using values from src_df.
     Starting from index it computes the measurements for the image following the interpolation method and considering n neighbors.
@@ -325,7 +334,11 @@ def interpolate_row(src_df, timestamp, index, interpolation, n):
     return interpolated_row
 
 
-def get_labels(sensors_dir, sensor_file, features):
+def get_labels(
+        sensors_dir,
+        sensor_file,
+        features
+):
     """
     Extract the labels from the sensor file.
 
@@ -341,4 +354,90 @@ def get_labels(sensors_dir, sensor_file, features):
     labels.to_csv(sensors_dir + '/labels.csv', mode='a', index=False, header=False)
 
 
-get_labels('D:/Dataset/Rover/KBPR/dataset/csv', 'frame_sensor_imu_standard_timestamp.csv', ['acc_x'])
+def train_val_test_split(
+        image_dir,
+        label_dir,
+        labels,
+        val_ratio=0.2,
+        test_ratio=0.1,
+):
+    """
+    Splits the dataset in train, validation and test sets.
+
+    :param image_dir: Path where all the images are located.
+    :param label_dir: Path where the labels are located.
+    :param val_ratio: Ratio of the validation set with respect to the training set.
+    :param test_ratio: Ratio of the test set with respect to the training set.
+    :param labels: Labels to use.
+    """
+
+    image_full = os.listdir(image_dir + '/full')
+    train_dst = image_dir + '/train'
+    val_dst = image_dir + '/val'
+    test_dst = image_dir + '/test'
+    label_file = label_dir + '/labels.csv'
+    sensor_df = pd.read_csv(label_file, header=None)
+
+    if os.path.exists(train_dst):
+        files = os.listdir(train_dst)
+        for f in files:
+            os.remove(os.path.join(train_dst, f))
+    if os.path.exists(val_dst):
+        files = os.listdir(val_dst)
+        for f in files:
+            os.remove(os.path.join(val_dst, f))
+    if os.path.exists(test_dst):
+        files = os.listdir(test_dst)
+        for f in files:
+            os.remove(os.path.join(test_dst, f))
+
+    if len(labels) != len(sensor_df.columns):
+        print('The number of passed labels and columns in the dataframe do not match.')
+        exit()
+
+    if len(image_full) == len(sensor_df):
+        print(f'\nDataset and label dimensions are: {len(image_full)}')
+    else:
+        print('\nError in the dimensions between X and y in  dataset.')
+
+    x_train, x_val, y_train, y_val = train_test_split(image_full, sensor_df, test_size=val_ratio, shuffle=False)
+
+    x_train, x_test, y_train, y_test = train_test_split(x_train, y_train, test_size=test_ratio, shuffle=False)
+
+    print(f'\nAfter the train-validation-test split with ratio {val_ratio} and {test_ratio} the dataset and label dimensions are:')
+    if len(x_train) == len(y_train):
+        print(len(x_train))
+    else:
+        print('\nError in the dimensions between X and y in training set.')
+    if len(x_val) == len(y_val):
+        print(len(x_val))
+    else:
+        print('\nError in the dimensions between X and y in validation set.')
+    if len(x_test) == len(y_test):
+        print(len(x_test))
+    else:
+        print('\nError in the dimensions between X and y in test set.')
+
+    print('\nSaving train, validation and test labels to file...')
+    y_train.to_csv(label_dir + '/train/labels.csv', mode='w', index=False, header=labels)
+    y_val.to_csv(label_dir + '/val/labels.csv', mode='w', index=False, header=labels)
+    y_test.to_csv(label_dir + '/test/labels.csv', mode='w', index=False, header=labels)
+
+    print('\nMoving training set images...')
+    for image in tqdm(x_train):
+        shutil.copy(str(os.path.join(image_dir, 'full', image)), str(os.path.join(train_dst, image)))
+
+    print('\nMoving validation set images...')
+    for image in tqdm(x_val):
+        shutil.copy(str(os.path.join(image_dir, 'full', image)), str(os.path.join(val_dst, image)))
+
+    print('\nMoving test set images...')
+    for image in tqdm(x_test):
+        shutil.copy(str(os.path.join(image_dir, 'full', image)), str(os.path.join(test_dst, image)))
+
+    if len(os.listdir(train_dst)) == len(y_train):
+        print('\nError in the dimensions between X and y in training set.')
+    if len(os.listdir(val_dst)) == len(y_val):
+        print('\nError in the dimensions between X and y in validation set.')
+    if len(os.listdir(test_dst)) == len(y_test):
+        print('\nError in the dimensions between X and y in test set.')
