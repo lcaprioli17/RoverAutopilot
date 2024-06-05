@@ -1,8 +1,12 @@
+import csv
+
 import pandas as pd
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torchmetrics
+from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 import torch.nn.functional as F
@@ -16,6 +20,29 @@ from sklearn.model_selection import train_test_split
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping
 from tqdm import tqdm
+
+
+class LogEpochLossCallback(pl.Callback):
+    def __init__(self, filename):
+        self.filename = filename
+        # Create and write the header to the CSV file
+        with open(self.filename, mode='w', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow(['epoch', 'train_loss', 'val_loss'])
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        # Get the train loss from the trainer's logged metrics
+        train_loss = trainer.callback_metrics.get('train_loss')
+        val_loss = trainer.callback_metrics.get('val_loss')
+
+        # Convert to float if not None
+        train_loss = float(train_loss) if train_loss is not None else None
+        val_loss = float(val_loss) if val_loss is not None else None
+
+        # Write the loss to the CSV file
+        with open(self.filename, mode='a', newline='') as file:
+            writer = csv.writer(file)
+            writer.writerow([trainer.current_epoch, train_loss, val_loss])
 
 
 class RoverImageDataset(Dataset):
@@ -147,6 +174,7 @@ class RoverRegressor(pl.LightningModule):
     def __init__(self):
         super(RoverRegressor, self).__init__()
         self.model = CNNLSTMModel()
+        # self.metric_fn = torchmetrics.MeanSquaredError()
         self.loss_fn = nn.MSELoss()
 
     def forward(self, x):
@@ -157,16 +185,22 @@ class RoverRegressor(pl.LightningModule):
         x = x.float()
         y = y.float()
         y_hat = self.forward(x)
+        y_hat = y_hat.view(-1).float()
+        # metric = self.metric_fn(y_hat, y)
         loss = self.loss_fn(y_hat, y)
-        return {"loss": loss}
+        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        return {'loss': loss}
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
         x = x.float()
         y = y.float()
         y_hat = self.forward(x)
+        y_hat = y_hat.view(-1).float()
+        # metric = self.metric_fn(y_hat, y)
         loss = self.loss_fn(y_hat, y)
-        return {"loss": loss}
+        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        return {'loss': loss}
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=0.001)
@@ -176,11 +210,13 @@ def main():
     images = 'D:/Dataset/Rover/KBPR/dataset/image/raw'
     labels = 'D:/Dataset/Rover/KBPR/dataset/label'
 
+    log_callback = LogEpochLossCallback('logs/epoch_loss.csv')
+
     data_module = RoverDataModule(images, labels)
 
     # Training
     model = RoverRegressor()
-    trainer = pl.Trainer(max_epochs=1, accelerator='gpu')
+    trainer = pl.Trainer(max_epochs=2, accelerator='gpu', callbacks=[log_callback])
     trainer.fit(model, data_module)
 
 
