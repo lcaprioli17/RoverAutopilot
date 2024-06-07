@@ -1,5 +1,6 @@
 import glob
 
+import numpy as np
 from tqdm import tqdm
 import os
 import shutil
@@ -226,6 +227,32 @@ def convert_timestamp_csv(
     df.to_csv(csv_dst, index=False)
 
 
+def get_velocity(
+        sensors_dir,
+        sensor_file
+):
+    sensor_df = pd.read_csv(str(os.path.join(sensors_dir, sensor_file)))
+    # Step 1: Convert timestamps to time intervals (in seconds)
+    sensor_df['time_interval'] = (sensor_df['timestamp'] - sensor_df['timestamp'].shift()).fillna(0)
+    sensor_df['time_interval'] = sensor_df['time_interval'].apply(lambda x: x.total_seconds())
+
+    # Step 2: Integrate acceleration to obtain velocity
+    # Using the trapezoidal rule for numerical integration
+    sensor_df['vel_x'] = np.cumsum(0.5 * (sensor_df['acc_x'] + sensor_df['acc_x'].shift(-1)) * sensor_df['time_interval'])
+    sensor_df['vel_y'] = np.cumsum(0.5 * (sensor_df['acc_y'] + sensor_df['acc_y'].shift(-1)) * sensor_df['time_interval'])
+    sensor_df['vel_z'] = np.cumsum(0.5 * (sensor_df['acc_z'] + sensor_df['acc_z'].shift(-1)) * sensor_df['time_interval'])
+
+    # Alternatively, you can use the cumtrapz function from numpy for integration
+    # from scipy.integrate import cumtrapz
+    # sensor_df['velocity'] = cumtrapz(sensor_df['acceleration'], dx=sensor_df['time_interval'], initial=0)
+
+    # Drop the 'time_interval' column if no longer needed
+    sensor_df.drop(columns=['time_interval'], inplace=True)
+    sensor_df.to_csv(sensors_dir + '/wVelocity-' + sensor_file, mode='w', index=False)
+
+    # Now, sensor_df will contain the integrated velocity measurements
+
+
 def interpolate_frame_sensor(
         img_dir,
         sensors_dir,
@@ -337,6 +364,7 @@ def interpolate_row(
 def get_labels(
         sensors_dir,
         sensor_file,
+        labels_dir,
         features
 ):
     """
@@ -344,6 +372,7 @@ def get_labels(
 
     :param sensors_dir: Path to the directory where all the sensors are saved.
     :param sensor_file: File containing the specific sensor measurements.
+    :param labels_dir: Path where to save the labels file.
     :param features: Features to extract and to use as labels.
     """
     sensor_path = sensors_dir + '/' + sensor_file
@@ -351,13 +380,12 @@ def get_labels(
 
     labels = pd.DataFrame(columns=features, data=sensor_df[features])
 
-    labels.to_csv(sensors_dir + '/labels.csv', mode='a', index=False, header=False)
+    labels.to_csv(labels_dir + '/labels.csv', mode='w', index=False, header=True)
 
 
 def train_val_test_split(
         image_dir,
         label_dir,
-        labels,
         val_ratio=0.2,
         test_ratio=0.1,
 ):
@@ -368,7 +396,6 @@ def train_val_test_split(
     :param label_dir: Path where the labels are located.
     :param val_ratio: Ratio of the validation set with respect to the training set.
     :param test_ratio: Ratio of the test set with respect to the training set.
-    :param labels: Labels to use.
     """
 
     image_full = os.listdir(image_dir + '/full')
@@ -376,7 +403,7 @@ def train_val_test_split(
     val_dst = image_dir + '/val'
     test_dst = image_dir + '/test'
     label_file = label_dir + '/labels.csv'
-    sensor_df = pd.read_csv(label_file, header=None)
+    sensor_df = pd.read_csv(label_file)
 
     if os.path.exists(train_dst):
         files = os.listdir(train_dst)
@@ -391,10 +418,6 @@ def train_val_test_split(
         for f in files:
             os.remove(os.path.join(test_dst, f))
 
-    if len(labels) != len(sensor_df.columns):
-        print('The number of passed labels and columns in the dataframe do not match.')
-        exit()
-
     if len(image_full) == len(sensor_df):
         print(f'\nDataset and label dimensions are: {len(image_full)}')
     else:
@@ -404,7 +427,7 @@ def train_val_test_split(
 
     x_train, x_test, y_train, y_test = train_test_split(x_train, y_train, test_size=test_ratio, shuffle=False)
 
-    print(f'\nAfter the train-validation-test split with ratio {val_ratio} and {test_ratio} the dataset and label dimensions are:')
+    print(f'\nAfter the training-validation-test split with ratio {val_ratio} and {test_ratio} the dataset and label dimensions are:')
     if len(x_train) == len(y_train):
         print(len(x_train))
     else:
@@ -419,9 +442,9 @@ def train_val_test_split(
         print('\nError in the dimensions between X and y in test set.')
 
     print('\nSaving train, validation and test labels to file...')
-    y_train.to_csv(label_dir + '/train/labels.csv', mode='w', index=False, header=labels)
-    y_val.to_csv(label_dir + '/val/labels.csv', mode='w', index=False, header=labels)
-    y_test.to_csv(label_dir + '/test/labels.csv', mode='w', index=False, header=labels)
+    y_train.to_csv(label_dir + '/train/labels.csv', mode='w', index=False)
+    y_val.to_csv(label_dir + '/val/labels.csv', mode='w', index=False)
+    y_test.to_csv(label_dir + '/test/labels.csv', mode='w', index=False)
 
     print('\nMoving training set images...')
     for image in tqdm(x_train):
@@ -435,9 +458,9 @@ def train_val_test_split(
     for image in tqdm(x_test):
         shutil.copy(str(os.path.join(image_dir, 'full', image)), str(os.path.join(test_dst, image)))
 
-    if len(os.listdir(train_dst)) == len(y_train):
+    if len(os.listdir(train_dst)) != len(y_train):
         print('\nError in the dimensions between X and y in training set.')
-    if len(os.listdir(val_dst)) == len(y_val):
+    if len(os.listdir(val_dst)) != len(y_val):
         print('\nError in the dimensions between X and y in validation set.')
-    if len(os.listdir(test_dst)) == len(y_test):
+    if len(os.listdir(test_dst)) != len(y_test):
         print('\nError in the dimensions between X and y in test set.')
