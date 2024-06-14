@@ -123,10 +123,10 @@ class RoverImageDataset(Dataset):
 
             images.append(image)
 
-            images = torch.stack(images)  # Stack images to create a sequence
-            label = torch.tensor(self.labels[idx + self.seq_len - 1], dtype=torch.float32)  # Use the label of the last image in the sequence
+        images = torch.stack(images)  # Stack images to create a sequence
+        label = torch.tensor(self.labels[idx + self.seq_len - 1], dtype=torch.float32)  # Use the label of the last image in the sequence
 
-            return images, label
+        return images, label
 
 
 class RoverDataModule(LightningDataModule):
@@ -214,7 +214,7 @@ class RoverDataModule(LightningDataModule):
         Returns:
             DataLoader: DataLoader for the training set.
         """
-        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+        return DataLoader(self.train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, persistent_workers=True)
 
     def val_dataloader(self):
         """
@@ -223,7 +223,7 @@ class RoverDataModule(LightningDataModule):
         Returns:
             DataLoader: DataLoader for the validation set.
         """
-        return DataLoader(self.val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, persistent_workers=True)
 
     def test_dataloader(self):
         """
@@ -232,7 +232,7 @@ class RoverDataModule(LightningDataModule):
         Returns:
             DataLoader: DataLoader for the test set.
         """
-        return DataLoader(self.test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+        return DataLoader(self.test, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, persistent_workers=True)
 
 
 class CNNLSTMModel(nn.Module):
@@ -245,22 +245,25 @@ class CNNLSTMModel(nn.Module):
 
         # CNN layers
         self.cnn = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(1, 4, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(4, 8, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
-        self.dropout = nn.Dropout(0.3)
+
+        # self.dropout = nn.Dropout(0.3)
+
         # LSTM layers
-        self.lstm = nn.LSTM(128 * 16 * 16, 256, batch_first=True)
+        self.lstm_input_size = 16 * 16 * 16  # Calculated based on the output dimensions of the CNN
+        self.lstm = nn.LSTM(self.lstm_input_size, 32, batch_first=True)
 
         # Fully connected layer
-        self.fc = nn.Linear(256, 2)
+        self.fc = nn.Linear(32, 2)
 
     def forward(self, x):
         """
@@ -360,15 +363,18 @@ class RoverRegressor(pl.LightningModule):
             'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, min_lr=1e-5),
             'monitor': 'val_loss'
         }
-        return torch.optim.Adam(self.parameters(), lr=0.001)
+        return [optimizer], [scheduler]
 
 
 def main():
     """
     Main function to run the training process.
     """
-    images = 'D:/Dataset/Rover/KBPR/dataset/image/raw'
-    labels = 'D:/Dataset/Rover/KBPR/dataset/label'
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = True
+
+    images = 'D:/Dataset/Rover/CPET/dataset/image'
+    labels = 'D:/Dataset/Rover/CPET/dataset/label'
 
     log_callback = LogEpochLossCallback('logs/epoch_loss.csv')
     early_stop_callback = EarlyStopping(
@@ -383,7 +389,7 @@ def main():
 
     # Training
     model = RoverRegressor()
-    trainer = pl.Trainer(max_epochs=100, accelerator='gpu', callbacks=[log_callback])
+    trainer = pl.Trainer(max_epochs=20, accelerator='gpu', callbacks=[log_callback, early_stop_callback])
     trainer.fit(model, data_module)
 
 
