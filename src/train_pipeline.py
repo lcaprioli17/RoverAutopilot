@@ -1,4 +1,6 @@
 import csv
+import shutil
+import sys
 
 import pandas as pd
 
@@ -23,6 +25,75 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 
+def save_model_summary(model, input_image_dimensions, filename='model_summary.txt'):
+    """
+    Save the model summary and trainable parameters to a text file.
+
+    :param model: PyTorch model
+    :param input_image_dimensions: Tuple representing input image dimensions
+    :param filename: Name of the file to save the summary
+    """
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+
+    print_model_summary(model, input_image_dimensions)
+
+    with open(os.path.join('logs', filename), 'w') as f:
+        # Print input image dimensions
+        f.write("Model summary:\n")
+        f.write(f"Input image dimensions: {input_image_dimensions}\n")
+
+        # Print model architecture
+        f.write(f"{model}\n")
+
+        # Calculate and print total trainable parameters
+        total_params = 0
+        for param_name, param in model.named_parameters():
+            if param.requires_grad:
+                total_params += param.numel()
+        f.write(f"Total trainable parameters: {total_params}\n")
+
+
+def print_model_summary(model, input_image_dimensions):
+    print("\nModel summary:")
+    print(f"Input image dimensions: {input_image_dimensions}")
+    print(model)
+    total_params = 0
+    for param_name, param in model.named_parameters():
+        if param.requires_grad:
+            total_params += param.numel()
+    print(f"Total trainable parameters: {total_params}")
+
+
+def delete_folder(path):
+    """
+    Delete a folder and all its contents recursively.
+
+    :param path: Path to the folder to be deleted.
+    """
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        print(f"Folder not found: {path}")
+    except PermissionError:
+        print(f"Permission denied: {path}")
+
+
+def wait_for_user_input():
+    while True:
+        user_input = input("\nContinue execution? (y/n): ").strip().lower()
+        if user_input == 'y':
+            print("Continuing execution...")
+            return
+        elif user_input == 'n':
+            print("Aborting...")
+            delete_folder('logs')
+            delete_folder('lightning_logs')
+            sys.exit()
+        else:
+            print("Invalid input! Please enter 'y' to continue or 'n' to abort.")
+
+
 class LogEpochLossCallback(pl.Callback):
     """
     Callback to log epoch loss to a CSV file.
@@ -38,7 +109,7 @@ class LogEpochLossCallback(pl.Callback):
             os.makedirs('logs')
         with open(self.filename, mode='w', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow(['epoch', 'train_loss', 'val_loss'])
+            writer.writerow(['epoch', 'train_loss_vel(x)', 'train_loss_gyro(z)', 'train_loss', 'val_loss_vel(x)', 'val_loss_gyro(z)', 'val_loss'])
 
     def on_train_epoch_end(self, trainer, pl_module):
         """
@@ -49,17 +120,25 @@ class LogEpochLossCallback(pl.Callback):
             pl_module (pl.LightningModule): The Lightning module being trained.
         """
         # Get the train loss from the trainer's logged metrics
+        train_loss1 = trainer.callback_metrics.get('train_loss_vel(x)')
+        train_loss2 = trainer.callback_metrics.get('train_loss_gyro(z)')
         train_loss = trainer.callback_metrics.get('train_loss')
+        val_loss1 = trainer.callback_metrics.get('val_loss_vel(x)')
+        val_loss2 = trainer.callback_metrics.get('val_loss_gyro(z)')
         val_loss = trainer.callback_metrics.get('val_loss')
 
         # Convert to float if not None
+        train_loss1 = float(train_loss1) if train_loss1 is not None else None
+        train_loss2 = float(train_loss2) if train_loss2 is not None else None
         train_loss = float(train_loss) if train_loss is not None else None
+        val_loss1 = float(val_loss1) if val_loss1 is not None else None
+        val_loss2 = float(val_loss2) if val_loss2 is not None else None
         val_loss = float(val_loss) if val_loss is not None else None
 
         # Write the loss to the CSV file
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
-            writer.writerow([trainer.current_epoch, train_loss, val_loss])
+            writer.writerow([trainer.current_epoch, train_loss1, train_loss2, train_loss, val_loss1, val_loss2, val_loss])
 
 
 class RoverImageDataset(Dataset):
@@ -136,21 +215,44 @@ class RoverDataModule(LightningDataModule):
     Args:
         data_dir (str): Directory with all the images.
         label_dir (str): Directory with labels.
-        transform (callable, optional): Optional transform to be applied on an image sample.
+        size (callable, optional): Optional size for transform.
         batch_size (int, optional): Batch size for data loading.
     """
 
-    def __init__(self, data_dir: str, label_dir: str, seq_len: int = 5, transform=None, batch_size: int = 32, num_workers: int = 0):
+    def __init__(self, data_dir: str, label_dir: str, seq_len: int = 5, size=(1, 256, 256), augment=False, batch_size: int = 32, num_workers: int = 0):
         super().__init__()
         self.data_dir = data_dir
         self.label_dir = label_dir
         self.seq_len = seq_len
-        self.transform = transform
+        self.size = size
+        self.augment = augment
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.train = None
         self.val = None
         self.test = None
+
+        self.transform = transforms.Compose([
+            transforms.Resize((self.size[1], self.size[2])),
+            transforms.ToTensor()
+        ])
+
+        self.augmentation = transforms.Compose([
+            transforms.Resize((self.size[1], self.size[2])),
+            transforms.RandomApply(self.random_augmentation(), p=0.5),  # Apply random augmentation with 50% probability
+            transforms.ToTensor()
+        ])
+
+    def random_augmentation(self):
+        # Define a list of augmentation transforms, each with its own probability
+        augmentation_transforms = [
+            transforms.RandomApply([transforms.RandomRotation(degrees=15)], p=0.5),  # Small rotations to simulate camera angle changes
+            transforms.RandomApply([transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1)], p=0.5),  # Lighting changes
+            transforms.RandomApply([transforms.RandomResizedCrop((self.size[1], self.size[2]), scale=(0.8, 1.0))], p=0.5),  # Crop and resize to simulate distance changes
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.5),  # Blur to simulate focus issues
+        ]
+
+        return augmentation_transforms
 
     def create_datasets(self, stage):
         """
@@ -161,17 +263,13 @@ class RoverDataModule(LightningDataModule):
 
         Returns:
             tuple: Datasets for training, validation, and testing.
+            float: Probability of augmentation
         """
-        if self.transform is None:
-            self.transform = transforms.Compose([
-                transforms.Resize((128, 128)),
-                transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))
-            ])
 
         # TODO: Check how to call the DataModule using the stages
         if stage == 'fit':
-            train_dataset = RoverImageDataset(os.path.join(self.data_dir, 'train'), os.path.join(self.label_dir, 'train'), seq_len=self.seq_len, transform=self.transform)
+            train_transform = self.augmentation if self.augment else self.transform
+            train_dataset = RoverImageDataset(os.path.join(self.data_dir, 'train'), os.path.join(self.label_dir, 'train'), seq_len=self.seq_len, transform=train_transform)
             val_dataset = RoverImageDataset(os.path.join(self.data_dir, 'val'), os.path.join(self.label_dir, 'val'), seq_len=self.seq_len, transform=self.transform)
 
             return train_dataset, val_dataset, None
@@ -184,14 +282,9 @@ class RoverDataModule(LightningDataModule):
             print('\nOne or more dataset where not initialized correctly.')
             exit()
 
-        # train_dataset = RoverImageDataset(os.path.join(self.data_dir, 'train'), os.path.join(self.label_dir, 'train'), transform=self.transform)
-        # val_dataset = RoverImageDataset(os.path.join(self.data_dir, 'val'), os.path.join(self.label_dir, 'val'), transform=self.transform)
-        # test_dataset = RoverImageDataset(os.path.join(self.data_dir, 'test'), os.path.join(self.label_dir, 'test'), transform=self.transform)
-        # return train_dataset, val_dataset, test_dataset
-
     def setup(self, stage: str):
         """
-        Setup the datasets based on the stage.
+        Set up the datasets based on the stage.
 
         Args:
             stage (str): Current stage - 'fit' or 'test'.
@@ -204,8 +297,6 @@ class RoverDataModule(LightningDataModule):
         # Assign test dataset for use in dataloader(s)
         if stage == "test":
             self.train, self.val, self.test = self.create_datasets(stage)
-
-        # self.train, self.val, self.test = self.create_datasets(stage)
 
     def train_dataloader(self):
         """
@@ -256,14 +347,15 @@ class CNNLSTMModel(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
 
-        # self.dropout = nn.Dropout(0.3)
+        self.dropout_cnn = nn.Dropout(0.5)
 
         # LSTM layers
-        self.lstm_input_size = 16 * 16 * 16  # Calculated based on the output dimensions of the CNN
-        self.lstm = nn.LSTM(self.lstm_input_size, 32, batch_first=True)
+        self.lstm_input_size = 16 * 32 * 32  # Calculated based on the output dimensions of the CNN
+        self.lstm = nn.LSTM(self.lstm_input_size, 16, batch_first=True)
+        self.dropout_lstm = nn.Dropout(0.5)
 
         # Fully connected layer
-        self.fc = nn.Linear(32, 2)
+        self.fc = nn.Linear(16, 2)
 
     def forward(self, x):
         """
@@ -294,7 +386,6 @@ class RoverRegressor(pl.LightningModule):
     def __init__(self):
         super(RoverRegressor, self).__init__()
         self.model = CNNLSTMModel()
-        # self.metric_fn = torchmetrics.MeanSquaredError()
         self.loss_fn = nn.MSELoss()
 
     def forward(self, x):
@@ -321,14 +412,21 @@ class RoverRegressor(pl.LightningModule):
             dict: Dictionary with loss.
         """
         x, y = batch
-        x = x.float()
-        y = y.float()
         y_hat = self.forward(x)
         y_hat = y_hat.view(-1, 2).float()
-        # metric = self.metric_fn(y_hat, y)
-        loss = self.loss_fn(y_hat, y)
-        self.log('train_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return {'loss': loss}
+        # Compute loss for each label
+        loss1 = self.loss_fn(y_hat[:, 0], y[:, 0])
+        loss2 = self.loss_fn(y_hat[:, 1], y[:, 1])
+
+        # Combine the losses
+        combined_loss = self.loss_fn(y_hat, y)
+
+        # Log both individual losses and the combined loss
+        self.log('train_loss_vel(x)', loss1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_loss_gyro(z)', loss2, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_loss', combined_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
+        return {'loss': combined_loss}
 
     def validation_step(self, batch, batch_idx):
         """
@@ -342,14 +440,21 @@ class RoverRegressor(pl.LightningModule):
             dict: Dictionary with loss.
         """
         x, y = batch
-        x = x.float()
-        y = y.float()
         y_hat = self.forward(x)
         y_hat = y_hat.view(-1, 2).float()
-        # metric = self.metric_fn(y_hat, y)
-        loss = self.loss_fn(y_hat, y)
-        self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
-        return {'loss': loss}
+        # Compute loss for each label
+        loss1 = self.loss_fn(y_hat[:, 0], y[:, 0])
+        loss2 = self.loss_fn(y_hat[:, 1], y[:, 1])
+
+        # Combine the losses
+        combined_loss = self.loss_fn(y_hat, y)
+
+        # Log both individual losses and the combined loss
+        self.log('val_loss_vel(x)', loss1, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_loss_gyro(z)', loss2, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_loss', combined_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+
+        return {'loss': combined_loss}
 
     def configure_optimizers(self):
         """
@@ -358,9 +463,9 @@ class RoverRegressor(pl.LightningModule):
         Returns:
             optim.Optimizer: Optimizer object.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001, weight_decay=0.01)
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001, weight_decay=1e-6)
         scheduler = {
-            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, min_lr=1e-5),
+            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, min_lr=1e-6),
             'monitor': 'val_loss'
         }
         return [optimizer], [scheduler]
@@ -384,12 +489,19 @@ def main():
         verbose=True,
         mode='min'
     )
-
-    data_module = RoverDataModule(images, labels, seq_len=3, batch_size=32, num_workers=7)
+    x = (1, 256, 256)
+    data_module = RoverDataModule(images, labels, seq_len=3, size=x, augment=True, batch_size=32, num_workers=7)
 
     # Training
     model = RoverRegressor()
-    trainer = pl.Trainer(max_epochs=20, accelerator='gpu', callbacks=[log_callback, early_stop_callback])
+    # Print the model architecture using torchsummary
+    save_model_summary(model, x)
+    num_epoch = 10
+    print(f'\nTraining for {num_epoch} epochs.')
+
+    wait_for_user_input()
+
+    trainer = pl.Trainer(max_epochs=num_epoch, accelerator='gpu', callbacks=[log_callback, early_stop_callback])
     trainer.fit(model, data_module)
 
 

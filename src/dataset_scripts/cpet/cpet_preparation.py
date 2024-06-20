@@ -25,4 +25,4 @@ cpet_label_path = 'D:/Dataset/Rover/CPET/dataset/label'
 # data_preparation.get_labels(cpet_sensor_path, 'frame_sensor_timestamp-cmd-velocities.csv', cpet_label_path, ['x_linear_velocity [m/s]', 'z_angular_velocity [rad/s]'])
 
 # Split the image dataset and labels in train, validation and test sets and saves them in /train, /val and /test
-data_preparation.train_val_test_split(cpet_img_path, cpet_label_path)
+# data_preparation.train_val_test_split(cpet_img_path, cpet_label_path)
