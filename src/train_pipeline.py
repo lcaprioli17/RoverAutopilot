@@ -94,6 +94,48 @@ def wait_for_user_input():
             print("Invalid input! Please enter 'y' to continue or 'n' to abort.")
 
 
+def build_trunk(input_dim, out_channels, num_blocks, wrap_time, batch_norm):
+    layers = []
+    in_ch, in_h, in_w = input_dim
+    out_ch = out_channels
+
+    for _ in range(num_blocks):
+        #TODO: search on how to apply a TimeDistributedLayer in Pytorch
+        if wrap_time:
+            layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1))
+            if batch_norm:
+                layers.append(nn.BatchNorm2d(out_ch))
+            layers.append(nn.ReLU())
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+        else:
+            layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=1, padding=1))
+            if batch_norm:
+                layers.append(nn.BatchNorm2d(out_ch))
+            layers.append(nn.ReLU())
+            layers.append(nn.MaxPool2d(kernel_size=2, stride=2))
+
+        in_ch = out_ch
+        in_h //= 2
+        in_w //= 2
+        out_ch *= 2
+
+    return nn.Sequential(*layers), in_ch, in_h, in_w
+
+
+def assign_loss(loss='mse'):
+    # Condition to choose loss function based on input_variable
+    if loss == 'mse':
+        loss_function = nn.MSELoss()
+    elif loss == 'mae':
+        loss_function = nn.MSELoss()
+    elif loss == 'huber':
+        loss_function = nn.HuberLoss()
+    else:
+        raise ValueError("Invalid input_variable. Choose 'mse', 'mae', or 'huber'.")
+
+    return loss_function
+
+
 class LogEpochLossCallback(pl.Callback):
     """
     Callback to log epoch loss to a CSV file.
@@ -135,6 +177,7 @@ class LogEpochLossCallback(pl.Callback):
         val_loss2 = float(val_loss2) if val_loss2 is not None else None
         val_loss = float(val_loss) if val_loss is not None else None
 
+        print(f'\nTRAINING LOSS: {train_loss}        VALIDATION LOSS: {val_loss}\n')
         # Write the loss to the CSV file
         with open(self.filename, mode='a', newline='') as file:
             writer = csv.writer(file)
@@ -180,7 +223,7 @@ class RoverImageDataset(Dataset):
         Returns:
             int: Number of samples.
         """
-        return len(self.image_files) - self.seq_len + 1  # Ensure the length accounts for sequence length to avoid out of range errors
+        return len(self.image_files) - self.seq_len  # + 1  # Ensure the length accounts for sequence length to avoid out of range errors
 
     def __getitem__(self, idx):
         """
@@ -193,19 +236,21 @@ class RoverImageDataset(Dataset):
             tuple: (image, label) where image is the transformed image and label is the corresponding label.
         """
         images = []
+        labels = []
         for i in range(idx, idx + self.seq_len):
             img_name = os.path.join(self.image_dir, self.image_files[i])
             image = Image.open(img_name).convert('L')
 
-            if self.transform:
+            if self.transform is not None:
                 image = self.transform(image)
 
             images.append(image)
+            labels.append(torch.tensor(self.labels[i], dtype=torch.float32))
 
         images = torch.stack(images)  # Stack images to create a sequence
-        label = torch.tensor(self.labels[idx + self.seq_len - 1], dtype=torch.float32)  # Use the label of the last image in the sequence
+        labels = torch.stack(labels)  # Use the label of the last image in the sequence
 
-        return images, label
+        return images, labels
 
 
 class RoverDataModule(LightningDataModule):
@@ -331,31 +376,35 @@ class CNNLSTMModel(nn.Module):
     CNN-LSTM model for regression.
     """
 
-    def __init__(self):
+    def __init__(self, input_dim=(1, 256, 256), out_channel_base=4, num_blocks=3, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0):
         super(CNNLSTMModel, self).__init__()
 
-        # CNN layers
-        self.cnn = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(4, 8, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),
-            nn.Conv2d(8, 16, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
+        self.input_dim = input_dim
+        self.out_channel_base = out_channel_base
+        self.num_blocks = num_blocks
+        self.wrap_time = wrap_time
+        self.lstm_layers = lstm_layers
+        self.hidden_size = hidden_size
+        self.dropout = dropout
+        self.batch_norm = batch_norm
 
-        self.dropout_cnn = nn.Dropout(0.5)
+        # CNN layers
+        self.cnn, self.out_channels, self.out_height, self.out_width = build_trunk(self.input_dim, self.out_channel_base, self.num_blocks, self.wrap_time, self.batch_norm)
+
+        if self.dropout > 0:
+            self.dropout_cnn = nn.Dropout(self.dropout)
 
         # LSTM layers
-        self.lstm_input_size = 16 * 32 * 32  # Calculated based on the output dimensions of the CNN
-        self.lstm = nn.LSTM(self.lstm_input_size, 16, batch_first=True)
-        self.dropout_lstm = nn.Dropout(0.5)
+        self.lstm_input_size = self.out_channels * self.out_height * self.out_width  # Calculated based on the output dimensions of the CNN
+        self.lstm = nn.LSTM(self.lstm_input_size, hidden_size=self.hidden_size, num_layers=self.lstm_layers)
+
+        if self.dropout > 0:
+            self.dropout_cnn = nn.Dropout(self.dropout)
 
         # Fully connected layer
-        self.fc = nn.Linear(16, 2)
+        self.fc = nn.Linear(self.hidden_size, 2)
+
+    # noinspection PyListCreation
 
     def forward(self, x):
         """
@@ -368,12 +417,28 @@ class CNNLSTMModel(nn.Module):
             torch.Tensor: Output tensor.
         """
         batch_size, seq_len, c, h, w = x.size()
-        c_in = x.view(batch_size * seq_len, c, h, w)
-        c_out = self.cnn(c_in)
-        r_in = c_out.view(batch_size, seq_len, -1)
-        r_out, (h_n, c_n) = self.lstm(r_in)
-        f_in = r_out[:, -1, :]
-        output = self.fc(f_in)
+
+        # Reshape for CNN input
+        cnn_in = x.view(batch_size * seq_len, c, h, w)
+
+        # Apply CNN layers
+        cnn_out = self.cnn(cnn_in)
+        if self.dropout > 0:
+            cnn_out = self.dropout_cnn(cnn_out)
+
+        # Reshape for LSTM input
+        lstm_in = cnn_out.view(batch_size, seq_len, -1)
+
+        # Apply LSTM layers
+        lstm_out, _ = self.lstm(lstm_in)
+        if self.dropout > 0:
+            lstm_out = self.dropout_lstm(lstm_out)
+
+        fc_in = lstm_out[:, -1, :]
+
+        # Apply fully connected layer
+        output = self.fc(fc_in)
+
         return output
 
 
@@ -383,10 +448,12 @@ class RoverRegressor(pl.LightningModule):
     PyTorch Lightning module for rover regression.
     """
 
-    def __init__(self):
+    def __init__(self, loss='mse', learning_rate=1e-4, weight_decay=1e-5, input_dim=(1, 256, 256), out_channel_base=4, num_blocks=3, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0):
         super(RoverRegressor, self).__init__()
-        self.model = CNNLSTMModel()
-        self.loss_fn = nn.MSELoss()
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+        self.model = CNNLSTMModel(input_dim, out_channel_base, num_blocks, wrap_time, batch_norm, lstm_layers, hidden_size, dropout)
+        self.loss_fn = assign_loss(loss)
 
     def forward(self, x):
         """
@@ -412,6 +479,7 @@ class RoverRegressor(pl.LightningModule):
             dict: Dictionary with loss.
         """
         x, y = batch
+        y = y[:, -1, :].view(-1, 2)
         y_hat = self.forward(x)
         y_hat = y_hat.view(-1, 2).float()
         # Compute loss for each label
@@ -440,6 +508,7 @@ class RoverRegressor(pl.LightningModule):
             dict: Dictionary with loss.
         """
         x, y = batch
+        y = y[:, -1, :].view(-1, 2)
         y_hat = self.forward(x)
         y_hat = y_hat.view(-1, 2).float()
         # Compute loss for each label
@@ -463,9 +532,9 @@ class RoverRegressor(pl.LightningModule):
         Returns:
             optim.Optimizer: Optimizer object.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=0.001, weight_decay=1e-6)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         scheduler = {
-            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=10, verbose=True, min_lr=1e-6),
+            'scheduler': ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=40, verbose=True, min_lr=self.learning_rate * 1e-2),
             'monitor': 'val_loss'
         }
         return [optimizer], [scheduler]
@@ -490,18 +559,18 @@ def main():
         mode='min'
     )
     x = (1, 256, 256)
-    data_module = RoverDataModule(images, labels, seq_len=3, size=x, augment=True, batch_size=32, num_workers=7)
+    data_module = RoverDataModule(images, labels, seq_len=5, size=x, augment=False, batch_size=64, num_workers=7)
 
     # Training
-    model = RoverRegressor()
+    model = RoverRegressor(loss='mse', learning_rate=1e-4, weight_decay=1e-5, input_dim=x, out_channel_base=4, num_blocks=3, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0)
     # Print the model architecture using torchsummary
     save_model_summary(model, x)
-    num_epoch = 10
+    num_epoch = 100
     print(f'\nTraining for {num_epoch} epochs.')
 
     wait_for_user_input()
 
-    trainer = pl.Trainer(max_epochs=num_epoch, accelerator='gpu', callbacks=[log_callback, early_stop_callback])
+    trainer = pl.Trainer(max_epochs=num_epoch, accelerator='gpu', callbacks=[log_callback])
     trainer.fit(model, data_module)
 
 

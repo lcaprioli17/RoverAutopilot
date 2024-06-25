@@ -3,6 +3,8 @@ import os
 import pandas as pd
 from matplotlib import pyplot as plt
 from tabulate import tabulate
+import cv2
+import os
 
 
 def line_plot(
@@ -156,3 +158,49 @@ def standard_metrics_to_txt(
     # Write metrics to file
     with open(file_path, 'w') as f:
         f.write(tabulate(metrics_df, headers='keys', tablefmt='pretty', showindex=False))
+
+
+# Function to read images from directory
+def load_images_from_folder(folder):
+    images = []
+    for filename in sorted(os.listdir(folder)):
+        img = cv2.imread(os.path.join(folder, filename))
+        if img is not None:
+            images.append(img)
+    return images
+
+
+# Function to generate video from images with labels
+def generate_video(images_folder, csv_file, output_video):
+    # Load images
+    images = load_images_from_folder(images_folder)
+
+    # Read CSV file
+    labels_df = pd.read_csv(csv_file)
+    labels = labels_df.values  # Assuming the CSV has one label per row, each corresponding to an image/frame
+
+    # Check if number of images and labels match
+    if len(images) != len(labels):
+        raise ValueError("Number of images and labels must be the same.")
+
+    # Get image size
+    height, width, _ = images[0].shape
+
+    # Define video writer
+    fourcc = cv2.VideoWriter.fourcc(*'mp4v')  # You can also use 'XVID', 'MJPG', etc.
+    fps = 25  # Adjust the frames per second as needed
+    out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
+
+    # Write images with labels to video
+    for i in range(len(images)):
+        img = images[i]
+        label = str(labels[i][0]) + '        ' + str(labels[i][0])
+
+        # Add label to the image
+        cv2.putText(img, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
+        # Write image to video
+        out.write(img)
+
+    # Release video writer
+    out.release()
