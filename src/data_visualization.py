@@ -6,6 +6,8 @@ from tabulate import tabulate
 import cv2
 import os
 
+from tqdm import tqdm
+
 
 def line_plot(
         dataframe_path: str,
@@ -73,7 +75,7 @@ def multi_line_plot(
         raise ValueError("Some features are not present in the dataframe")
 
     standard_metrics(df[features])
-    standard_metrics_to_txt(df[features])
+    # standard_metrics_to_txt(df[features])
 
     num_features = len(features)
 
@@ -163,7 +165,7 @@ def standard_metrics_to_txt(
 # Function to read images from directory
 def load_images_from_folder(folder):
     images = []
-    for filename in sorted(os.listdir(folder)):
+    for filename in tqdm(sorted(os.listdir(folder))):
         img = cv2.imread(os.path.join(folder, filename))
         if img is not None:
             images.append(img)
@@ -192,9 +194,10 @@ def generate_video(images_folder, csv_file, output_video):
     out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
 
     # Write images with labels to video
-    for i in range(len(images)):
+    for i in tqdm(range(len(images))):
         img = images[i]
-        label = str(labels[i][0]) + '        ' + str(labels[i][0])
+
+        label = str(labels[i][0]) + '        ' + str(labels[i][1])
 
         # Add label to the image
         cv2.putText(img, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)

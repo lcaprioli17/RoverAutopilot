@@ -22,7 +22,9 @@ from sklearn.model_selection import train_test_split
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import EarlyStopping
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torchvision.models.detection.backbone_utils import BackboneWithFPN
 from tqdm import tqdm
+from torchvision.models import resnet18, resnet101
 
 
 def save_model_summary(model, input_image_dimensions, filename='model_summary.txt'):
@@ -189,21 +191,32 @@ class RoverImageDataset(Dataset):
     Custom Dataset for loading rover images and their corresponding labels.
 
     Args:
-        image_dir (str): Directory with all the images.
+        image_path (str): Directory with all the images.
         label_dir (str): Directory with labels.
         transform (callable, optional): Optional transform to be applied on an image sample.
     """
 
-    def __init__(self, image_dir, label_dir, seq_len=5, transform=None):
-        self.image_dir = image_dir
+    def __init__(self, image_path, label_dir, seq_len=5, transform=None):
+        self.image_path = os.path.join(image_path, 'image_path.csv')
         self.labels_file = os.path.join(label_dir, 'labels.csv')
         self.seq_len = seq_len
         self.transform = transform
-        self.image_files = [f for f in os.listdir(image_dir) if f.endswith('.png') or f.endswith('.jpg')]
+        self.image_file = self.load_image_paths()
         self.labels = self.load_labels()
 
         # Debugging statement
-        print(f"Loaded {len(self.image_files)} images and {len(self.labels)} labels with dim {len(self.labels[0])}.")
+        print(f"Loaded {len(self.image_file)} images and {len(self.labels)} labels with dim {len(self.labels[0])}.")
+
+    def load_image_paths(self):
+        """
+        Load image paths from the CSV file.
+
+        Returns:
+            list: List of image paths.
+        """
+        df = pd.read_csv(self.image_path)
+        path_list = df['image_path'].tolist()
+        return path_list
 
     def load_labels(self):
         """
@@ -223,7 +236,7 @@ class RoverImageDataset(Dataset):
         Returns:
             int: Number of samples.
         """
-        return len(self.image_files) - self.seq_len  # + 1  # Ensure the length accounts for sequence length to avoid out of range errors
+        return len(self.image_file) - self.seq_len  + 1  # Ensure the length accounts for sequence length to avoid out of range errors
 
     def __getitem__(self, idx):
         """
@@ -238,7 +251,7 @@ class RoverImageDataset(Dataset):
         images = []
         labels = []
         for i in range(idx, idx + self.seq_len):
-            img_name = os.path.join(self.image_dir, self.image_files[i])
+            img_name = self.image_file[i]
             image = Image.open(img_name).convert('L')
 
             if self.transform is not None:
@@ -376,7 +389,7 @@ class CNNLSTMModel(nn.Module):
     CNN-LSTM model for regression.
     """
 
-    def __init__(self, input_dim=(1, 256, 256), out_channel_base=4, num_blocks=3, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0):
+    def __init__(self, input_dim=(1, 256, 256), out_channel_base=4, num_blocks=2, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0, backbone='scratch'):
         super(CNNLSTMModel, self).__init__()
 
         self.input_dim = input_dim
@@ -389,23 +402,39 @@ class CNNLSTMModel(nn.Module):
         self.batch_norm = batch_norm
 
         # CNN layers
-        self.cnn, self.out_channels, self.out_height, self.out_width = build_trunk(self.input_dim, self.out_channel_base, self.num_blocks, self.wrap_time, self.batch_norm)
+        if backbone == 'scratch':
+            self.cnn, self.out_channels, self.out_height, self.out_width = build_trunk(self.input_dim, self.out_channel_base, self.num_blocks, self.wrap_time, self.batch_norm)
+        elif backbone == 'resnet18':
+            # Load pretrained ResNet-18 without classification layer
+            resnet = resnet18(pretrained=True)
+            self.cnn = nn.Sequential(*list(resnet.children())[:-2])  # Remove last layers (avgpool and fc)
 
-        if self.dropout > 0:
+            self.out_channels = 512  # ResNet-18 outputs 512 channels
+            self.out_height = 8  # Adjust based on input dimensions and ResNet-18 architecture
+            self.out_width = 8   # Adjust based on input dimensions and ResNet-18 architecture
+
+        if self.dropout > 0.0:
             self.dropout_cnn = nn.Dropout(self.dropout)
 
         # LSTM layers
         self.lstm_input_size = self.out_channels * self.out_height * self.out_width  # Calculated based on the output dimensions of the CNN
-        self.lstm = nn.LSTM(self.lstm_input_size, hidden_size=self.hidden_size, num_layers=self.lstm_layers)
+        if self.lstm_layers > 1:
+            self.lstm = nn.LSTM(self.lstm_input_size, hidden_size=self.hidden_size, num_layers=self.lstm_layers, dropout=self.dropout)
+        else:
+            self.lstm = nn.LSTM(self.lstm_input_size, hidden_size=self.hidden_size, num_layers=self.lstm_layers)
 
-        if self.dropout > 0:
-            self.dropout_cnn = nn.Dropout(self.dropout)
+        if self.dropout > 0.0:
+            self.dropout_lstm = nn.Dropout(self.dropout)
 
         # Fully connected layer
-        self.fc = nn.Linear(self.hidden_size, 2)
+        self.fc = nn.Linear(self.hidden_size, self.hidden_size // 2)
+
+        if self.dropout > 0.0:
+            self.dropout_fc = nn.Dropout(self.dropout)
+
+        self.output = nn.Linear(self.hidden_size // 2, 2)
 
     # noinspection PyListCreation
-
     def forward(self, x):
         """
         Forward pass of the model.
@@ -423,7 +452,7 @@ class CNNLSTMModel(nn.Module):
 
         # Apply CNN layers
         cnn_out = self.cnn(cnn_in)
-        if self.dropout > 0:
+        if self.dropout > 0.0:
             cnn_out = self.dropout_cnn(cnn_out)
 
         # Reshape for LSTM input
@@ -431,13 +460,18 @@ class CNNLSTMModel(nn.Module):
 
         # Apply LSTM layers
         lstm_out, _ = self.lstm(lstm_in)
-        if self.dropout > 0:
+        if self.dropout > 0.0:
             lstm_out = self.dropout_lstm(lstm_out)
 
         fc_in = lstm_out[:, -1, :]
 
+        fc_out = self.fc(fc_in)
+
+        if self.dropout > 0.0:
+            fc_out = self.dropout_fc(fc_out)
+
         # Apply fully connected layer
-        output = self.fc(fc_in)
+        output = self.output(fc_out)
 
         return output
 
@@ -547,8 +581,8 @@ def main():
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = True
 
-    images = 'D:/Dataset/Rover/CPET/dataset/image'
-    labels = 'D:/Dataset/Rover/CPET/dataset/label'
+    images = 'D:/Dataset/devens_snowy_fixed/dataset/image'
+    labels = 'D:/Dataset/devens_snowy_fixed/dataset/label'
 
     log_callback = LogEpochLossCallback('logs/epoch_loss.csv')
     early_stop_callback = EarlyStopping(
@@ -556,16 +590,16 @@ def main():
         min_delta=0.00,
         patience=20,
         verbose=True,
-        mode='min'
+        mode='min',
     )
     x = (1, 256, 256)
-    data_module = RoverDataModule(images, labels, seq_len=5, size=x, augment=False, batch_size=64, num_workers=7)
+    data_module = RoverDataModule(images, labels, seq_len=10, size=x, augment=True, batch_size=64, num_workers=7)
 
     # Training
-    model = RoverRegressor(loss='mse', learning_rate=1e-4, weight_decay=1e-5, input_dim=x, out_channel_base=4, num_blocks=3, wrap_time=False, batch_norm=False, lstm_layers=1, hidden_size=32, dropout=0.0)
+    model = RoverRegressor(loss='mse', learning_rate=1e-4, weight_decay=1e-5, input_dim=x, out_channel_base=8, num_blocks=4, wrap_time=False, batch_norm=True, lstm_layers=2, hidden_size=128, dropout=0.2)
     # Print the model architecture using torchsummary
     save_model_summary(model, x)
-    num_epoch = 100
+    num_epoch = 50
     print(f'\nTraining for {num_epoch} epochs.')
 
     wait_for_user_input()
