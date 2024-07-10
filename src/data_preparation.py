@@ -93,6 +93,37 @@ def concatenate_files(
             outfile.write(infile.read())
 
 
+def concatenate_csv(file_path, input_file):
+    """
+    Concatenate multiple CSV files into a single CSV file.
+
+    Parameters:
+    files (list of str): List of file paths to CSV files to be concatenated.
+    output_file (str): Path to the output CSV file.
+    """
+    # Initialize an empty list to store dataframes
+    dfs = []
+
+    for path, dirs, files in tqdm(os.walk(file_path)):
+        for file in files:
+            if file == input_file:
+                df = pd.read_csv(str(os.path.join(path, file)))
+                dfs.append(df)
+
+    # Concatenate all the dataframes in the list
+    concatenated_df = pd.concat(dfs, ignore_index=True)
+
+    output_file = str(os.path.join(file_path, input_file))
+
+    # Save the concatenated dataframe to a new CSV file
+    concatenated_df.to_csv(output_file, index=False)
+    print(f"Concatenated CSV saved as {output_file}")
+
+
+def replace_small_numbers_in_df(df, threshold=10e-3):
+    return df.applymap(lambda x: 0 if abs(x) < threshold else x)
+
+
 def images_from_root(
         root_dir: str,
         src_dir: str,
@@ -198,6 +229,8 @@ def sensor_to_dataset(
                     convert_txt_to_csv(output_sensor, csv_sensor)
 
     df = pd.read_csv(csv_sensor)
+
+    df = replace_small_numbers_in_df(df)
 
     # Step 2: Get the list of column names
     column_names = df.columns
@@ -392,6 +425,9 @@ def interpolate_frame_sensor(
     for filename in tqdm(os.listdir(img_dir)):
         img_timestamp = filename
 
+        if not (filename.endswith('.png') or filename.endswith('.jpeg') or filename.endswith('.jpg')):
+            continue
+
         for substring in sub_fixes:
             img_timestamp = img_timestamp.replace(substring, '')
 
@@ -468,13 +504,15 @@ def get_labels(
         sensor_file: str,
         labels_dir: str,
         features: list,
-        min_vals: list[float],
-        max_vals: list[float],
+        min_mean: list[float] = None,
+        max_std: list[float] = None,
         normalization_method: str = None
 ):
     """
     Extract the labels from the sensor file and normalize them.
 
+    :param max_vals:
+    :param min_vals:
     :param sensors_dir: Path to the directory where all the sensors are saved.
     :param sensor_file: File containing the specific sensor measurements.
     :param labels_dir: Path where to save the labels file.
@@ -494,12 +532,17 @@ def get_labels(
     if normalization_method is None:
         normalized_labels = labels
     elif normalization_method == 'min-max':
-        min_vals = np.array(min_vals)
-        max_vals = np.array(max_vals)
+        min_vals = np.array(min_mean)
+        max_vals = np.array(max_std)
         normalized_labels = 2 * (labels - min_vals) / (max_vals - min_vals) - 1
     elif normalization_method == 'z-score':
-        scaler = StandardScaler()
-        normalized_labels = scaler.fit_transform(labels)
+        if min_mean is None or max_std is None:
+            raise ValueError("mean_vals and std_vals must be provided for z-score normalization.")
+
+        mean_vals = np.array(min_mean)
+        std_vals = np.array(max_std)
+
+        normalized_labels = (labels - mean_vals) / std_vals
         normalized_labels = pd.DataFrame(normalized_labels, columns=features)
     else:
         raise ValueError("Invalid normalization method. Use 'min-max' or 'z-score'.")
@@ -618,7 +661,7 @@ def move_n_to_n_image(
         src_dir: str,
         target_dir: str,
         pivot: str = None,
-        crop_ratio: float = 0,
+        crop_ratio: list[float] = None,
 ):
     data_root = src_dir + '/data'
     dataset_dir = src_dir + '/dataset/image/full'
@@ -645,17 +688,17 @@ def move_n_to_n_image(
 
                     # Open the image
                     with Image.open(src_file) as img:
-                        if 1 >= crop_ratio > 0:
+                        if crop_ratio is not None:
                             # Get the dimensions of the image
                             width, height = img.size
 
                             # Calculate the crop box dimensions
-                            left = int(width * crop_ratio)  # 10% of the width
-                            upper = int(height * crop_ratio)  # 10% of the height
-                            right = int(width * (1 - crop_ratio))  # 90% of the width
-                            lower = int(height * (1 - crop_ratio))  # 90% of the height
+                            left = int(width * crop_ratio[0])  # 10% of the width
+                            top = int(height * crop_ratio[1])  # 10% of the height
+                            right = int(width * (1 - crop_ratio[2]))  # 90% of the width
+                            bottom = int(height * (1 - crop_ratio[3]))  # 90% of the height
                             # Crop the image if crop_box is provided
-                            img = img.crop((left, upper, right, lower))
+                            img = img.crop((left, top, right, bottom))
 
                         # Save the cropped image to the destination
                         img.save(dst_file)
@@ -686,7 +729,24 @@ def move_n_to_n_sensor(
                 elif input_sensor.endswith('.csv'):
                     shutil.copy(input_sensor, output_sensor)
 
+                df = pd.read_csv(output_sensor)
+                df = replace_small_numbers_in_df(df)
+                df.to_csv(output_sensor, index=False)
+
                 i += 1
+
+
+def traverse_to_csv(
+        src_dir: str,
+):
+    dataset_dir = src_dir
+
+    for sub_dir in os.listdir(dataset_dir):
+        path_image = os.path.join(dataset_dir, sub_dir)
+        image_traverse = os.listdir(path_image)
+        # Filter files by the desired file type
+        image_traverse = [file for file in image_traverse if file.endswith('.png') or file.endswith('.jpeg') or file.endswith('.jpg')]
+        write_image_paths_to_csv(image_traverse, path_image, os.path.join(path_image, 'image_path.csv'))
 
 
 def repeat_sec_to_timestamp(
@@ -721,14 +781,15 @@ def repeat_get_labels(
         sensor_file: str,
         labels_dir: str,
         features: list[str],
-        min_vals: list[float],
-        max_vals: list[float],
+        min_vals: list[float] = None,
+        max_vals: list[float] = None,
         normalization_method: str = None
 ):
     for sub_dir in os.listdir(sensors_dir):
         path_sensor = os.path.join(sensors_dir, sub_dir)
-        path_label = os.path.join(labels_dir, sub_dir)
-        get_labels(path_sensor, sensor_file, path_label, features, min_vals, max_vals, normalization_method)
+        if os.path.isdir(path_sensor):
+            path_label = os.path.join(labels_dir, sub_dir)
+            get_labels(path_sensor, sensor_file, path_label, features, min_vals, max_vals, normalization_method)
 
 
 def repeat_train_val_test_split(

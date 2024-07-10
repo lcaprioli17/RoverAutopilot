@@ -106,15 +106,16 @@ def standard_metrics(
         "Metric": ["Min", "Idx Min", "Max", "Idx Max", "Mean", "Std Dev"],
     }
 
-    for column in df.columns[1:]:
-        metrics[column] = [
-            df[column].min(),
-            str(int(df[column].idxmin())),
-            df[column].max(),
-            str(int(df[column].idxmax())),
-            df[column].mean(),
-            df[column].std()
-        ]
+    for column in df.columns:
+        if df[column].isna().sum() == 0:
+            metrics[column] = [
+                df[column].min(),
+                str(int(df[column].idxmin())),
+                df[column].max(),
+                str(int(df[column].idxmax())),
+                df[column].mean(),
+                df[column].std()
+            ]
 
     metrics_df = pd.DataFrame(metrics)
 
@@ -143,14 +144,15 @@ def standard_metrics_to_txt(
     }
 
     for column in df.columns[1:]:
-        metrics[column] = [
-            df[column].min(),
-            str(int(df[column].idxmin())),
-            df[column].max(),
-            str(int(df[column].idxmax())),
-            df[column].mean(),
-            df[column].std()
-        ]
+        if df[column].isna().sum() == 0:
+            metrics[column] = [
+                df[column].min(),
+                str(int(df[column].idxmin())),
+                df[column].max(),
+                str(int(df[column].idxmax())),
+                df[column].mean(),
+                df[column].std()
+            ]
 
     metrics_df = pd.DataFrame(metrics)
 
@@ -166,7 +168,9 @@ def standard_metrics_to_txt(
 def load_images_from_folder(folder):
     images = []
     for filename in tqdm(sorted(os.listdir(folder))):
-        img = cv2.imread(os.path.join(folder, filename))
+        img = None
+        if filename.endswith('.png') or filename.endswith('.jpeg') or filename.endswith('.jpg'):
+            img = cv2.imread(os.path.join(folder, filename))
         if img is not None:
             images.append(img)
     return images
@@ -190,14 +194,15 @@ def generate_video(images_folder, csv_file, output_video):
 
     # Define video writer
     fourcc = cv2.VideoWriter.fourcc(*'mp4v')  # You can also use 'XVID', 'MJPG', etc.
-    fps = 25  # Adjust the frames per second as needed
+    fps = 3  # Adjust the frames per second as needed
     out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
 
     # Write images with labels to video
+    print('Generating video...')
     for i in tqdm(range(len(images))):
         img = images[i]
 
-        label = str(labels[i][0]) + '        ' + str(labels[i][1])
+        label = str(labels[i][0]) + '  ' + str(labels[i][1]) + '  ' + str(labels[i][-1])
 
         # Add label to the image
         cv2.putText(img, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
@@ -207,3 +212,32 @@ def generate_video(images_folder, csv_file, output_video):
 
     # Release video writer
     out.release()
+
+
+def aggregate_and_print_stats(csv_root, csv_name):
+    aggregated_df = pd.DataFrame()
+
+    folders = os.listdir(csv_root)
+
+    for folder in folders:
+        csv_path = os.path.join(csv_root, folder, csv_name)
+        if os.path.exists(csv_path):
+            df = pd.read_csv(str(csv_path))
+            aggregated_df = pd.concat([aggregated_df, df], ignore_index=True)
+        else:
+            print(f"CSV {csv_name} not found in folder {folder}")
+
+    if not aggregated_df.empty:
+        print("Max values of each feature:")
+        print(aggregated_df.max())
+
+        print("\nMin values of each feature:")
+        print(aggregated_df.min())
+
+        print("\nMean values of each feature:")
+        print(aggregated_df.mean())
+
+        print("\nStandard deviation of each feature:")
+        print(aggregated_df.std())
+    else:
+        print(f"No data found for CSV {csv_name} across the specified folders.")
