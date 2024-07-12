@@ -194,7 +194,7 @@ def generate_video(images_folder, csv_file, output_video):
 
     # Define video writer
     fourcc = cv2.VideoWriter.fourcc(*'mp4v')  # You can also use 'XVID', 'MJPG', etc.
-    fps = 3  # Adjust the frames per second as needed
+    fps = 15  # Adjust the frames per second as needed
     out = cv2.VideoWriter(output_video, fourcc, fps, (width, height))
 
     # Write images with labels to video
@@ -202,7 +202,7 @@ def generate_video(images_folder, csv_file, output_video):
     for i in tqdm(range(len(images))):
         img = images[i]
 
-        label = str(labels[i][0]) + '  ' + str(labels[i][1]) + '  ' + str(labels[i][-1])
+        label = 'X_AXIS_SPEED: ' + str(round(labels[i][1], 4)) + '    Z_AXIS_ROTATION: ' + str(round(labels[i][-1], 4))
 
         # Add label to the image
         cv2.putText(img, label, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
